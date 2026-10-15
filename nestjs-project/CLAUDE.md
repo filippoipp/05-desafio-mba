@@ -13,6 +13,8 @@ docker compose ps   # all services must show status "running"
 Then verify each infrastructure service is actually ready to accept connections — not just running:
 
 - **PostgreSQL:** `docker compose exec db pg_isready -U streamtube` — expect `accepting connections`
+- **Redis:** `docker compose exec redis redis-cli ping` — expect `PONG`
+- **MinIO:** the API creates the `streamtube` bucket on startup and retries for a few seconds while MinIO boots. There is no separate healthcheck in Compose.
 
 Only start the NestJS dev server (`npm run start:dev`) when the user **explicitly** asks to run the application — never as part of "start the environment".
 
@@ -32,8 +34,21 @@ docker compose exec nestjs-api npm run start:dev
 ```
 
 Services:
-- `nestjs-api` — NestJS API, port `3000`
+- `nestjs-api` — NestJS API. Container port `3000`. Host port `${API_HOST_PORT:-3000}`
+- `video-worker` — same image, command `npm run start:worker`. Consumes the `video-processing` BullMQ queue, probes the source with ffprobe, and writes a JPEG thumbnail
 - `db` — PostgreSQL 17, port `5432`, database `streamtube`, user/password `streamtube`
+- `redis` — Redis 7, container port `6379`. Host port `${REDIS_HOST_PORT:-6379}`
+- `minio` — MinIO (S3 API). Container ports `9000` (API) and `9001` (console). Host ports `${MINIO_HOST_PORT:-9000}` and `${MINIO_CONSOLE_HOST_PORT:-9001}`. Root user `streamtube`, password `streamtube-secret`, bucket `streamtube`
+- `mailpit` — SMTP on `1025`, UI on `8025`
+
+Inside the Compose network the API and the worker use `DB_HOST=db`, `REDIS_HOST=redis`, and `S3_ENDPOINT=http://minio:9000`. `S3_PUBLIC_ENDPOINT` is the host written into presigned URLs (also `http://minio:9000` when the client calling those URLs runs in Compose).
+
+Video HTTP API (`VideosModule`):
+- `POST /videos/uploads` — JWT. Creates a `draft` and returns presigned multipart part URLs. `201` with `Location: /videos/:id`
+- `POST /videos/:id/complete` — JWT. First completion returns `202` and enqueues processing. A replay while `processing` or `ready` returns `200`
+- `GET /videos/:id` — JWT, owner only
+- `GET /videos/:publicId/playback` — public presigned GET when status is `ready`
+- `GET /videos/:publicId/download` — public presigned GET with `Content-Disposition: attachment` when status is `ready`
 
 All verification and teardown commands run on the **host machine**:
 
@@ -154,7 +169,7 @@ NestJS with standard module structure. Source lives in `src/`, compiled output i
 - **TypeScript:** `nodenext` module resolution, `ES2023` target, `strictNullChecks` on, `noImplicitAny` off
 - **Decorators:** `emitDecoratorMetadata` + `experimentalDecorators` enabled — required for NestJS DI
 - **Prettier:** single quotes, trailing commas everywhere
-- **ESLint:** `no-explicit-any` allowed; `no-floating-promises` and `no-unsafe-argument` are warnings
+- **ESLint:** `no-explicit-any` allowed; `no-floating-promises` and `no-unsafe-argument` are warnings. Test files (`*.spec.ts`, `*.integration-spec.ts`, `*.e2e-spec.ts`) turn off `no-unsafe-assignment`, `no-unsafe-member-access`, `no-unsafe-return`, `no-unsafe-call`, `require-await`, and `unbound-method`
 
 ## REST Conventions
 
